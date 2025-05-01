@@ -170,3 +170,110 @@ export const getSavedLocations = () => {
     return [];
   }
 };
+
+/**
+ * Check if geolocation is available and has permission
+ */
+export const checkGeolocationPermission = async (): Promise<boolean> => {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(false);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      () => resolve(true),
+      (error) => {
+        console.log('Geolocation permission check error:', error);
+        resolve(false);
+      },
+      { maximumAge: 60000, timeout: 5000 }
+    );
+  });
+};
+
+/**
+ * Get current position with improved mobile support
+ */
+export const getCurrentPosition = (): Promise<GeolocationPosition> => {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation is not supported by your browser'));
+      return;
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      timeout: 10000, // 10 seconds
+      maximumAge: 0 // Don't use cached position
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        // Additional validation for mobile
+        if (position.coords.accuracy > 1000) {
+          console.warn('Low accuracy location detected', position.coords.accuracy);
+        }
+        resolve(position);
+      },
+      (error) => {
+        let errorMessage = 'Could not get your location. ';
+        
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            errorMessage += 'Please enable location services in your device settings and browser permissions.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            errorMessage += 'Location information is unavailable. Please check your GPS settings.';
+            break;
+          case error.TIMEOUT:
+            errorMessage += 'The request to get your location timed out. Please try again in an area with better signal.';
+            break;
+          default:
+            errorMessage += error.message;
+        }
+        
+        console.error('Geolocation error:', errorMessage);
+        reject(new Error(errorMessage));
+      },
+      options
+    );
+  });
+};
+
+/**
+ * Start watching position with mobile improvements
+ */
+export const watchPosition = (
+  onSuccess: (position: GeolocationPosition) => void,
+  onError?: (error: GeolocationPositionError) => void,
+  options?: PositionOptions
+): number => {
+  const watchOptions = {
+    enableHighAccuracy: true,
+    timeout: 10000,
+    maximumAge: 0,
+    ...options
+  };
+
+  return navigator.geolocation.watchPosition(
+    (position) => {
+      // Additional validation for mobile
+      if (position.coords.accuracy > 1000) {
+        console.warn('Low accuracy position update', position.coords.accuracy);
+      }
+      onSuccess(position);
+    },
+    (error) => {
+      console.error('Watch position error:', error);
+      if (onError) onError(error);
+      
+      // Special handling for Android Chrome timeout issues
+      if (error.code === error.TIMEOUT && /android/i.test(navigator.userAgent)) {
+        console.log('Retrying with different timeout for Android');
+        return watchPosition(onSuccess, onError, { ...watchOptions, timeout: 30000 });
+      }
+    },
+    watchOptions
+  );
+};

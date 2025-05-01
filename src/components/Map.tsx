@@ -23,6 +23,9 @@ import {
   getRoute,
   reverseGeocode,
   getSavedLocations,
+  getCurrentPosition,
+  checkGeolocationPermission,
+  watchPosition,
 } from "../services/LocationService";
 
 const Map: React.FC = () => {
@@ -49,7 +52,9 @@ const Map: React.FC = () => {
   const [savedLocations, setSavedLocations] = useState<SavedLocation[]>([]);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [permissionAsked, setPermissionAsked] = useState(false);
-  const locationRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locationRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const locationMaxRetries = useRef(3);
   const locationRetryCount = useRef(0);
 
@@ -163,7 +168,8 @@ const Map: React.FC = () => {
 
   // Get device OS information to provide more specific guidance
   const getDeviceOS = () => {
-    const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
+    const userAgent =
+      navigator.userAgent || navigator.vendor || (window as any).opera;
 
     if (/android/i.test(userAgent)) {
       return "Android";
@@ -179,11 +185,11 @@ const Map: React.FC = () => {
   // Get browser information for more specific troubleshooting
   const getBrowserInfo = () => {
     const userAgent = navigator.userAgent;
-    
+
     if (/Safari/.test(userAgent) && !/Chrome/.test(userAgent)) {
       return "Safari";
     }
-    
+
     if (/Chrome/.test(userAgent)) {
       return "Chrome";
     }
@@ -199,7 +205,7 @@ const Map: React.FC = () => {
   const getDeviceSpecificHelp = () => {
     const os = getDeviceOS();
     const browser = getBrowserInfo();
-    
+
     if (os === "iOS") {
       if (browser === "Safari") {
         return "On iOS, go to Settings > Safari > Privacy & Security > Location Services and ensure Safari is allowed to access your location.";
@@ -209,60 +215,117 @@ const Map: React.FC = () => {
     } else if (os === "Android") {
       return "On Android, go to Settings > Location > App permissions > Browser (or Chrome) and ensure location access is enabled.";
     }
-    
+
     return "Please ensure location services are enabled for your browser in your device settings.";
   };
 
-  const startLocationTracking = () => {
-    if (!navigator.geolocation) {
-      setLocationError("Geolocation is not supported by your browser");
-      return;
+  const startLocationTracking = async () => {
+    try {
+      // First check permissions
+      const hasPermission = await checkGeolocationPermission();
+      if (!hasPermission) {
+        setLocationError("Location permission not granted. Please enable in browser settings.");
+        return;
+      }
+  
+      setIsLocating(true);
+      setLocationEnabled(true);
+      setLocationError(null);
+  
+      const position = await getCurrentPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      
+      const locationData = { lat: latitude, lng: longitude };
+      setCurrentLocation(locationData);
+      
+      try {
+        const address = await reverseGeocode(latitude, longitude);
+        setStartAddress(address);
+      } catch (error) {
+        console.error('Error getting address:', error);
+        setStartAddress('Current Location');
+      }
+      
+      if (mapRef.current) {
+        const zoomLevel = accuracy < 100 ? 18 : accuracy < 500 ? 16 : 14;
+        mapRef.current.setView([latitude, longitude], zoomLevel);
+        
+        if (!locationMarkerRef.current) {
+          locationMarkerRef.current = L.marker([latitude, longitude], {
+            icon: createPulsingDotIcon(),
+            zIndexOffset: 1000
+          }).addTo(mapRef.current)
+            .bindPopup("Your current location");
+        } else {
+          locationMarkerRef.current.setLatLng([latitude, longitude]);
+        }
+  
+        const circleColor = accuracy < 100 ? '#4CAF50' : accuracy < 500 ? '#FFC107' : '#FF5722';
+        if (accuracyCircleRef) {
+          accuracyCircleRef.setLatLng([latitude, longitude])
+            .setRadius(accuracy)
+            .setStyle({
+              color: circleColor,
+              fillColor: circleColor
+            });
+        } else {
+          const circle = L.circle([latitude, longitude], {
+            color: circleColor,
+            fillColor: circleColor,
+            fillOpacity: 0.1,
+            radius: accuracy,
+            weight: 1
+          }).addTo(mapRef.current);
+          setAccuracyCircleRef(circle);
+        }
+  
+        if (accuracy > 500) {
+          setLocationError("Location accuracy is low. Please ensure GPS is enabled and you have a clear view of the sky.");
+        } else {
+          setLocationError(null);
+        }
+      }
+      setIsLocating(false);
+  
+      // Start watching position with improved mobile handling
+      watchIdRef.current = watchPosition
+      (
+        async (position) => {
+          const { latitude, longitude, accuracy } = position.coords;
+          const locationData = { lat: latitude, lng: longitude };
+          setCurrentLocation(locationData);
+          
+          if (mapRef.current && locationMarkerRef.current) {
+            locationMarkerRef.current.setLatLng([latitude, longitude]);
+            
+            if (accuracyCircleRef) {
+              const circleColor = accuracy < 100 ? '#4CAF50' : accuracy < 500 ? '#FFC107' : '#FF5722';
+              accuracyCircleRef.setLatLng([latitude, longitude])
+                .setRadius(accuracy)
+                .setStyle({
+                  color: circleColor,
+                  fillColor: circleColor
+                });
+            }
+            
+            if (destination) {
+              calculateRoute();
+            }
+          }
+        },
+        (error) => {
+          console.error("Error watching position:", error);
+          if (error.code === error.TIMEOUT) {
+            // Already handled in watchPosition
+          }
+        }
+      );
+    } catch (error: any) {
+      console.error(`Error in location tracking: ${error.message}`);
+      setLocationError(error.message);
+      setLocationEnabled(false);
+      setIsLocating(false);
     }
-
-    setIsLocating(true);
-    setLocationEnabled(true);
-    setLocationError(null);
-    locationRetryCount.current = 0;
-
-    // Reset permission states when starting new tracking
-    if (permissionDenied) {
-      setPermissionDenied(false);
-    }
-
-    // On mobile, start with less strict options for initial location
-    const isMobile = /Mobi|Android/i.test(navigator.userAgent);
-    const initialOptions = {
-      enableHighAccuracy: !isMobile, // false for mobile initially for faster response
-      maximumAge: isMobile ? 60000 : 30000,
-      timeout: isMobile ? 15000 : 10000,
-    };
-
-    setPermissionAsked(true);
-    
-    console.log("Requesting location with options:", initialOptions);
-    
-    navigator.geolocation.getCurrentPosition(
-      handlePositionSuccess,
-      (error) => {
-        console.log("Initial position error:", error.code, error.message);
-        
-        // Try again with different options
-        const fallbackOptions = {
-          enableHighAccuracy: isMobile, // Try opposite setting
-          maximumAge: 0, // No cache
-          timeout: 30000, // Longer timeout
-        };
-        
-        console.log("Retrying with fallback options:", fallbackOptions);
-        
-        navigator.geolocation.getCurrentPosition(
-          handlePositionSuccess,
-          handlePositionError,
-          fallbackOptions
-        );
-      },
-      initialOptions
-    );
   };
 
   const handlePositionSuccess = async (position: GeolocationPosition) => {
@@ -271,7 +334,7 @@ const Map: React.FC = () => {
 
     clearLocationRetryTimeout();
     locationRetryCount.current = 0;
-    
+
     const locationData = { lat: latitude, lng: longitude };
     setCurrentLocation(locationData);
 
@@ -335,18 +398,22 @@ const Map: React.FC = () => {
   const retryLocationRequest = () => {
     if (locationRetryCount.current < locationMaxRetries.current) {
       locationRetryCount.current += 1;
-      console.log(`Retrying location request (${locationRetryCount.current}/${locationMaxRetries.current})`);
-      
+      console.log(
+        `Retrying location request (${locationRetryCount.current}/${locationMaxRetries.current})`
+      );
+
       clearLocationRetryTimeout();
-      
+
       const options = {
         enableHighAccuracy: locationRetryCount.current > 1, // Try with high accuracy on later attempts
         maximumAge: 0,
-        timeout: 20000 + (locationRetryCount.current * 5000), // Increase timeout with each retry
+        timeout: 20000 + locationRetryCount.current * 5000, // Increase timeout with each retry
       };
-      
-      setLocationError(`Trying to get your location (attempt ${locationRetryCount.current}/${locationMaxRetries.current})...`);
-      
+
+      setLocationError(
+        `Trying to get your location (attempt ${locationRetryCount.current}/${locationMaxRetries.current})...`
+      );
+
       navigator.geolocation.getCurrentPosition(
         handlePositionSuccess,
         (error) => {
@@ -354,13 +421,18 @@ const Map: React.FC = () => {
             handlePositionError(error);
           } else {
             // Schedule another retry
-            locationRetryTimeoutRef.current = setTimeout(retryLocationRequest, 2000);
+            locationRetryTimeoutRef.current = setTimeout(
+              retryLocationRequest,
+              2000
+            );
           }
         },
         options
       );
     } else {
-      setLocationError("Unable to get your location after multiple attempts. Please check your settings.");
+      setLocationError(
+        "Unable to get your location after multiple attempts. Please check your settings."
+      );
       setIsLocating(false);
       setLocationEnabled(false);
     }
@@ -381,7 +453,10 @@ const Map: React.FC = () => {
           "Unable to detect your location. Check if location services are enabled and try again.";
         // For this specific error, try to retry
         if (locationRetryCount.current < locationMaxRetries.current) {
-          locationRetryTimeoutRef.current = setTimeout(retryLocationRequest, 2000);
+          locationRetryTimeoutRef.current = setTimeout(
+            retryLocationRequest,
+            2000
+          );
           return;
         }
         break;
@@ -390,7 +465,10 @@ const Map: React.FC = () => {
           "Location request timed out. Check your internet connection and try again.";
         // For timeout, also retry
         if (locationRetryCount.current < locationMaxRetries.current) {
-          locationRetryTimeoutRef.current = setTimeout(retryLocationRequest, 2000);
+          locationRetryTimeoutRef.current = setTimeout(
+            retryLocationRequest,
+            2000
+          );
           return;
         }
         break;
@@ -453,12 +531,12 @@ const Map: React.FC = () => {
       },
       (error) => {
         console.error("Watch position error:", error.code, error.message);
-        
+
         // If the watch fails due to timeout, restart it
         if (error.code === error.TIMEOUT) {
           console.log("Watch position timeout, restarting...");
           stopLocationTracking();
-          
+
           // Small delay before restarting
           setTimeout(() => {
             if (locationEnabled) {
@@ -474,7 +552,7 @@ const Map: React.FC = () => {
   const stopLocationTracking = () => {
     console.log("Stopping location tracking");
     clearLocationRetryTimeout();
-    
+
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
@@ -645,8 +723,10 @@ const Map: React.FC = () => {
 
       {!permissionAsked && !locationEnabled && (
         <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded z-50 shadow-md max-w-xs text-center">
-          <p className="mb-2">This app needs your location to provide directions</p>
-          <button 
+          <p className="mb-2">
+            This app needs your location to provide directions
+          </p>
+          <button
             onClick={requestLocationPermission}
             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
           >
