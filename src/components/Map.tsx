@@ -10,7 +10,7 @@ import MapControls from './MapControls';
 import SideMenu from './SideMenu';
 import Canvas2DMap from './Canvas2DMap';
 import { Location, RouteInfo, TransportMode, SearchResult, SavedLocation } from '../types/map';
-import { getRoute, reverseGeocode, getSavedLocations, saveLocation } from '../services/LocationService';
+import { getRoute, reverseGeocode, getSavedLocations } from '../services/LocationService';
 
 const Map: React.FC = () => {
   const mapRef = useRef<L.Map | null>(null);
