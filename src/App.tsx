@@ -7,7 +7,6 @@ function App() {
     <div className="app">
       <Routes>
         <Route path="/" element={<Map />} />
-        <Route path="/dennis_map" element={<Map />} />
       </Routes>
     </div>
   )
